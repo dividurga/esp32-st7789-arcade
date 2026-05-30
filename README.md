@@ -12,7 +12,7 @@
 
 An ESP32 port of the classic Pacman game for a 1.9" ST7789 170×320 display, with an arcade home screen and a Flappy Bird clone.
 
-Originally based on [Pacman-Arduino-Due](https://github.com/DrNCXCortex/Pacman-Arduino-Due) by Dr. NCX, ported through [esp32_ILI9328](https://github.com/Mhage/esp32_ILI9328_Pacman) by Mhage.
+Originally based on Pacman-Arduino-Due by Dr. NCX (original repo taken down), ported through [esp32_ILI9328_Pacman](https://github.com/MhageGH/esp32_ILI9328_Pacman) by Mhage.
 
 ---
 
