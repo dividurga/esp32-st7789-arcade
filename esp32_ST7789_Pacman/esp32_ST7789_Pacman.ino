@@ -1,6 +1,6 @@
 /******************************************************************************/
 /*                                                                            */
-/*  PACMAN GAME FOR ARDUINO DUE                                               */
+/*  PACMAN GAME FOR ESP32 — ST7789 170×320                                    */
 /*                                                                            */
 /******************************************************************************/
 /*  Copyright (c) 2014  Dr. NCX (mirracle.mxx@gmail.com)                      */
@@ -15,18 +15,11 @@
 /* SOFTWARE.                                                                  */
 /*                                                                            */
 /*  MIT license, all text above must be included in any redistribution.       */
+/*                                                                            */
+/*  Portions Copyright (c) 2026 dividurga                                     */
+/*  Fork: ST7789 port, Flappy Bird, arcade homescreen, ESP32 button input     */
 
-
-/* 
- *  Controller configuration:
- *  Buttons UP, RIGHT, DOWN, LEFT, PAUSE and RESTART are each assigned on characters '8', '6', '2', '4', 'x', 'z' in the both case of SerialPort and WiFi UDP.
- */
-
-const char ssid[] = "ESP32";
-const char password[] = "esp32pass";
-const int localPort = 10000;
-
-byte SPEED = 2; // 1=SLOW 2=NORMAL 4=FAST //do not try  other values!!!
+byte SPEED = 2; // 1=SLOW  2=NORMAL  4=FAST  (only these three values)
 
 /******************************************************************************/
 /*   MAIN GAME VARIABLES                                                      */
@@ -35,41 +28,52 @@ byte SPEED = 2; // 1=SLOW 2=NORMAL 4=FAST //do not try  other values!!!
 #define BONUS_INACTIVE_TIME 600
 #define BONUS_ACTIVE_TIME 300
 
-#define START_LIFES 2
+#define START_LIVES 2
 #define START_LEVEL 1
 
-byte MAXLIFES = 5;
-byte LIFES = START_LIFES;
+byte MAXLIVES = 5;
+byte LIVES = START_LIVES;
 byte GAMEWIN = 0;
 byte GAMEOVER = 0;
-byte DEMO = 1;
 byte LEVEL = START_LEVEL;
 byte ACTUALBONUS = 0;  //actual bonus icon
 byte ACTIVEBONUS = 0;  //status of bonus
 byte GAMEPAUSED = 0;
 
-byte PACMANFALLBACK = 0;
+enum  AppState  { StateHome, StatePacman, StatePacmanEnd, StateFlappy };
+AppState appState   = StateHome;
+byte     menuSel    = 0;   // 0 = PACMAN, 1 = FLAPPY BIRD
+byte     endMenuSel = 0;   // 0 = RESTART, 1 = MENU
 
 #include <SPI.h>
-#include <WiFi.h>
-#include <WiFiUdp.h>
 
-#include "DrawindexedMap.h"
-#define CS 5
-#define RESET 17
-ili9328SPI tft(CS, RESET);
-WiFiUDP udp;
+
+#include "DrawIndexedMap.h"
+// ST7789 display GPIO assignments (SCK=18, MOSI=23 are hardware SPI defaults)
+#define CS     14   // SPI chip-select
+#define DC     16   // data / command
+#define RESET  17   // hardware reset
+
+// ── Button GPIO assignments ────────────────────────────────────────────────
+#define PIN_BTN_A      26   // pause / unpause
+#define PIN_BTN_LEFT   4
+#define PIN_BTN_DOWN   13
+#define PIN_BTN_UP     27
+#define PIN_BTN_RIGHT   22
+ili9328SPI tft(CS, DC, RESET);
+
 
 /******************************************************************************/
-/*   Controll KEYPAD LOOP                                                     */
+/*   BUTTON STATE FLAGS                                                       */
 /******************************************************************************/
 
-boolean but_A = false;    //38
-boolean but_B = false;   //40
-boolean but_UP = false;       //52
-boolean but_DOWN = false;     //50
-boolean but_LEFT = false;     //48
-boolean but_RIGHT = false;    //46
+boolean but_A = false;
+boolean but_B = false;
+boolean but_UP = false;
+boolean but_DOWN = false;
+boolean but_LEFT = false;
+boolean but_RIGHT = false;
+
 
 /******************************************************************************/
 /*   GAME VARIABLES AND DEFINITIONS                                           */
@@ -106,7 +110,7 @@ enum {
 
 #define ushort uint16_t
 
-#define BINKY 0
+#define BLINKY 0
 #define PINKY 1
 #define INKY  2
 #define CLYDE 3
@@ -115,7 +119,7 @@ enum {
 
 const byte _initSprites[] =
 {
-  BINKY,  14,     17 - 3,   31, MLeft,
+  BLINKY,  14,     17 - 3,   31, MLeft,
   PINKY,  14 - 2,   17,     79, MLeft,
   INKY,   14,     17,     137, MLeft,
   CLYDE,  14 + 2,   17,     203, MRight,
@@ -126,7 +130,7 @@ const byte _initSprites[] =
 //  Ghost colors
 const byte _palette2[] =
 {
-  0, 11, 1, 15, // BINKY red
+  0, 11, 1, 15, // BLINKY red
   0, 11, 3, 15, // PINKY pink
   0, 11, 5, 15, // INKY cyan
   0, 11, 7, 15, // CLYDE brown
@@ -182,7 +186,7 @@ const byte _opposite[] = { MStopped, MLeft, MUp, MRight, MDown };
 
 const byte _scatterChase[] = { 7, 20, 7, 20, 5, 20, 5, 0 };
 const byte _scatterTargets[] = { 2, 0, 25, 0, 0, 35, 27, 35 }; // inky/clyde scatter targets are backwards
-const char _pinkyTargetOffset[] = { 4, 0, 0, 4, -4, 0, -4, 4 }; // Includes pinky target bug
+const signed char _pinkyTargetOffset[] = { 4, 0, 0, 4, -4, 0, -4, 4 }; // Includes pinky target bug
 
 #define FRIGHTENEDGHOSTSPRITE 0
 #define GHOSTSPRITE 2
@@ -195,6 +199,7 @@ const byte _pacVAnim[] = { 4, 3, 1, 3 };
 
 word _BonusInactiveTimmer = BONUS_INACTIVE_TIME;
 word _BonusActiveTimmer = 0;
+void drawBanner(const char* text);
 
 /******************************************************************************/
 /*   GAME - Sprite Class                                                      */
@@ -209,7 +214,7 @@ class Sprite
     byte tx, ty;        // target x and y
 
     SpriteState state;
-    byte  pentimer;     // could be the same
+    byte  pentimer;     // frames to wait before leaving pen
 
     byte who;
     byte _speed;
@@ -246,10 +251,9 @@ class Sprite
     {
       int16_t dx = cx - x;
       int16_t dy = cy - y;
-      return dx * dx + dy * dy; // Distance to target
+      return dx * dx + dy * dy;
     }
 
-    //  once per sprite, not 9 times
     void SetupDraw(GameState gameState, byte deadGhostIndex)
     {
       sy = 1;
@@ -257,7 +261,6 @@ class Sprite
       byte p = phase >> 3;
 
       if (who == BONUS) {
-        //BONUS ICONS
         bits = 21 + ACTUALBONUS;
         palette2 = BONUSPALETTE + ACTUALBONUS;
         return;
@@ -379,13 +382,13 @@ class Playfield
 
     Sprite _sprites[5];
 
-    Sprite _BonusSprite; //Bonus
+    Sprite _BonusSprite;
 
     byte _dotMap[(32 / 4) * (36 - 6)];
 
     GameState _state;
-    long    _score;             // 7 digits of score
-    long    _hiscore;             // 7 digits of score
+    long    _score;
+    long    _hiscore;   // 7 digits max
     long    _lifescore;
     signed char    _scoreStr[8];
     signed char    _hiscoreStr[8];
@@ -394,22 +397,18 @@ class Playfield
     ushort  _stateTimer;
     ushort  _frightenedTimer;
     byte    _frightenedCount;
-    byte    _scIndex;           //
+    byte    _scIndex;
     ushort  _scTimer;           // next change of sc status
+    uint16_t _dotsLeft;         // remaining dots — drives Cruise Elroy thresholds
 
     bool _inited;
-    byte* _dirty;
   public:
-    Playfield() : _inited(false)
-    {
-      //  Swizzle palette TODO just fix in place
-//      byte * p = (byte*)_paletteW;
-//      for (int16_t i = 0; i < 16; i++)
-//      {
-//        ushort w = _paletteW[i];    // Swizzle
-//        *p++ = w >> 8;
-//        *p++ = w;
-//      }
+    Playfield() : _inited(false) {}
+
+    void forceRedraw() {
+      tft.fillRect(0, 0, TFT_WIDTH, TFT_HEIGHT, 0x0000);
+      memset(updateMap, 0, sizeof(updateMap));
+      DrawAllBG();
     }
 
     // Draw 2 bit BG into 8 bit icon tiles at bottom
@@ -456,13 +455,13 @@ class Playfield
       if (LEVEL % 5 == 2) return pgm_read_byte(playMap2 + ty * 28 + cx);
       if (LEVEL % 5 == 3) return pgm_read_byte(playMap3 + ty * 28 + cx);
       if (LEVEL % 5 == 4) return pgm_read_byte(playMap4 + ty * 28 + cx);
-      if (LEVEL % 5 == 0) return pgm_read_byte(playMap5 + ty * 28 + cx);
+      return pgm_read_byte(playMap5 + ty * 28 + cx);
     }
 
     // Draw 1 bit BG into 8 bit tile
     void DrawBG(byte cx, byte cy, byte* tile)
     {
-      if (cy >= 34) //DRAW ICONS BELLOW MAZE
+      if (cy >= 34) // icon row below maze
       {
         DrawBG2(cx, cy, tile);
         return;
@@ -481,19 +480,10 @@ class Playfield
       byte b = GetTile(cx, cy);
       const byte* bg;
 
-      //  This is a little messy
       memset(tile, 0, 64);
       if (cy == 20 && cx >= 11 && cx < 17)
       {
-        if (DEMO == 1 && ACTIVEBONUS == 1) return;
-
-        if ((_state != ReadyState && GAMEPAUSED != 1 && DEMO != 1) || ACTIVEBONUS == 1) b = 0; // hide 'READY!'
-        else if (DEMO == 1 && cx == 11) b = 0;
-        else if (DEMO == 1 && cx == 12) b = 'D';
-        else if (DEMO == 1 && cx == 13) b = 'E';
-        else if (DEMO == 1 && cx == 14) b = 'M';
-        else if (DEMO == 1 && cx == 15) b = 'O';
-        else if (DEMO == 1 && cx == 16) b = 0;
+        if ((_state != ReadyState && GAMEPAUSED != 1) || ACTIVEBONUS == 1) b = 0; // hide 'READY!'
         else if (GAMEPAUSED == 1 && cx == 11) b = 'P';
         else if (GAMEPAUSED == 1 && cx == 12) b = 'A';
         else if (GAMEPAUSED == 1 && cx == 13) b = 'U';
@@ -508,7 +498,7 @@ class Playfield
         else if (cx >= 10 && cx < 17)
           b = _hiscoreStr[cx - 10]; // HiScore
       } else {
-        if (b == DOT || b == PILL)  // DOT==7 or PILL==16
+        if (b == DOT || b == PILL)  // DOT==7, PILL==14
         {
           if (!GetDot(cx, cy))
             return;
@@ -524,7 +514,7 @@ class Playfield
 
       for (byte y = 0; y < 8; y++)
       {
-        signed char bits = (signed char)pgm_read_byte(bg++);  ///WARNING CHAR MUST BE signed !!!
+        signed char bits = (signed char)pgm_read_byte(bg++);  // signed: MSB drives fill direction
         byte x = 0;
         while (bits)
         {
@@ -544,54 +534,31 @@ class Playfield
       byte tile[8 * 8];
 
       //      Fill with BG
-      if (y == 20 && x >= 11 && x < 17 && DEMO == 1 && ACTIVEBONUS == 1)  return;
       DrawBG(x, y, tile);
 
-      //      Overlay sprites
-      x <<= 3;
-      y <<= 3;
+      //      Overlay sprites (sprite logic stays at 8px/tile resolution)
+      uint16_t px = x << 3;
+      uint16_t py = y << 3;
       if (sprites)
       {
         for (byte i = 0; i < 5; i++)
-          _sprites[i].Draw8(x, y, tile);
+          _sprites[i].Draw8(px, py, tile);
 
-        //AND BONUS
-        if (ACTIVEBONUS) _BonusSprite.Draw8(x, y, tile);
+        if (ACTIVEBONUS) _BonusSprite.Draw8(px, py, tile);
 
       }
 
-      //      Show sprite block
-#if 0
-      for (byte i = 0; i < 5; i++)
-      {
-        Sprite* s = _sprites + i;
-        if (s->cx == (x >> 3) && s->cy == (y >> 3))
-        {
-          memset(tile, 0, 8);
-          for (byte j = 1; j < 7; j++)
-            tile[j * 8] = tile[j * 8 + 7] = 0;
-          memset(tile + 56, 0, 8);
-        }
-      }
-#endif
+      // Screen coords: 6px/tile, 1px left margin, 52px top margin
+      // Label row (y==0) is shifted 2px up so it doesn't visually merge with the score row.
+      uint16_t sx = x * 6 + (170 - 168) / 2;
+      uint16_t sy = y * 6 + (320 - 216) / 2 - (y == 0 ? 2 : 0);
 
-      x += (240 - 224) / 2;
-      y += (320 - 288) / 2;
-
-
-      //      Should be a direct Graphics call
-
-      byte n = tile[0];
-      byte i = 0;
-      word color = (word)_paletteW[n];
-
-      drawIndexedmap(&tft, tile, x, y);
+      drawIndexedmap(&tft, tile, sx, sy);
     }
 
     boolean updateMap [36][28];
 
-    //  Mark tile as dirty (should not need range checking here)
-    void Mark(int16_t x, int16_t y, byte* m)
+    void Mark(int16_t x, int16_t y)
     {
       x -= 4;
       y -= 4;
@@ -614,29 +581,26 @@ class Playfield
         for (byte x = 0; x < 28; x++) {
           Draw(x, y, false);
         }
+      drawBanner("PACMAN");
     }
 
-    //  Draw sprites overlayed on cells
     void DrawAll()
     {
-      byte* m = _dirty;
-
       //  Mark sprite old/new positions as dirty
       for (byte i = 0; i < 5; i++)
       {
         Sprite* s = _sprites + i;
-        Mark(s->lastx, s->lasty, m);
-        Mark(s->_x, s->_y, m);
+        Mark(s->lastx, s->lasty);
+        Mark(s->_x, s->_y);
 
       }
 
       // Mark BONUS sprite old/new positions as dirty
       Sprite* _s = &_BonusSprite;
-      Mark(_s->lastx, _s->lasty, m);
-      Mark(_s->_x, _s->_y, m);
+      Mark(_s->lastx, _s->lasty);
+      Mark(_s->_x, _s->_y);
 
 
-      //  Animation
       for (byte i = 0; i < 5; i++)
         _sprites[i].SetupDraw(_state, _frightenedCount - 1);
 
@@ -674,29 +638,35 @@ class Playfield
 
       int16_t dx = s->tx - cx;
       int16_t dy = s->ty - cy;
-      return (dx * dx + dy * dy); // Distance to target
+      return (dx * dx + dy * dy);
 
     }
 
     void UpdateTimers()
     {
-      // Update scatter/chase selector, low bit of index indicates scatter
+      // Update scatter/chase selector, low bit of index indicates scatter.
+      // On every mode transition all active ghosts reverse — original arcade behaviour.
       if (_scIndex < 8)
       {
         if (_scTimer-- == 0)
         {
           byte duration = pgm_read_byte(_scatterChase + _scIndex++);
           _scTimer = duration * FPS;
+          for (byte i = 0; i < 4; i++) {
+            Sprite* g = _sprites + i;
+            if (g->state == RunState || g->state == FrightenedState)
+              g->dir = OppositeDirection(g->dir);
+          }
         }
       }
 
-      // BONUS timmer
+      // Bonus timer
       if (ACTIVEBONUS == 0 && _BonusInactiveTimmer-- == 0) {
-        _BonusActiveTimmer = BONUS_ACTIVE_TIME; //5*FPS;
+        _BonusActiveTimmer = BONUS_ACTIVE_TIME;
         ACTIVEBONUS = 1;
       }
       if (ACTIVEBONUS == 1 && _BonusActiveTimmer-- == 0) {
-        _BonusInactiveTimmer = BONUS_INACTIVE_TIME; //10*FPS;
+        _BonusInactiveTimmer = BONUS_INACTIVE_TIME;
         ACTIVEBONUS = 0;
       }
 
@@ -716,107 +686,6 @@ class Playfield
       }
     }
 
-    //  Target closes pill, run from ghosts?
-    void PacmanAI()
-    {
-      Sprite* pacman;
-      pacman = _sprites + PACMAN;
-
-      //  Chase frightened ghosts
-      Sprite* closestGhost = NULL;
-      Sprite* frightenedGhost = NULL;
-      Sprite* closestAttackingGhost = NULL;
-      Sprite* DeadEyesStateGhost = NULL;
-      int16_t dist = 0x7FFF;
-      int16_t closestfrightenedDist = 0x7FFF;
-      int16_t closestAttackingDist = 0x7FFF;
-      for (byte i = 0; i < 4; i++)
-      {
-        Sprite* s = _sprites + i;
-        int16_t d = s->Distance(pacman->cx, pacman->cy);
-        if (d < dist)
-        {
-
-          dist = d;
-          if (s->state == FrightenedState ) {
-            frightenedGhost = s;
-            closestfrightenedDist = d;
-          }
-          else {
-            closestAttackingGhost = s;
-            closestAttackingDist = d;
-          }
-          closestGhost = s;
-
-          if ( s->state == DeadEyesState ) DeadEyesStateGhost = s;
-
-        }
-      }
-
-      PACMANFALLBACK = 0;
-
-      if (DEMO == 1 && !DeadEyesStateGhost && frightenedGhost )
-      {
-        pacman->Target(frightenedGhost->cx, frightenedGhost->cy);
-        return;
-      }
-
-
-
-      // Under threat; just avoid closest ghost
-      if (DEMO == 1 && !DeadEyesStateGhost && dist <= 32  && closestAttackingDist < closestfrightenedDist )
-      {
-        if (dist <= 16) {
-          pacman->Target( pacman->cx * 2 - closestAttackingGhost->cx, pacman->cy * 2 - closestAttackingGhost->cy);
-          PACMANFALLBACK = 1;
-        } else {
-          pacman->Target( pacman->cx * 2 - closestAttackingGhost->cx, pacman->cy * 2 - closestAttackingGhost->cy);
-        }
-        return;
-      }
-
-      if (ACTIVEBONUS == 1) {
-        pacman->Target(13, 20);
-        return;
-      }
-
-
-      //  Go for the pill
-      if (GetDot(1, 6))
-        pacman->Target(1, 6);
-      else if (GetDot(26, 6))
-        pacman->Target(26, 6);
-      else if (GetDot(1, 26))
-        pacman->Target(1, 26);
-      else if (GetDot(26, 26))
-        pacman->Target(26, 26);
-      else
-      {
-        // closest dot
-        int16_t dist = 0x7FFF;
-        for (byte y = 4; y < 32; y++)
-        {
-          for (byte x = 1; x < 26; x++)
-          {
-            if (GetDot(x, y))
-            {
-              int16_t d = pacman->Distance(x, y);
-              if (d < dist)
-              {
-                dist = d;
-                pacman->Target(x, y);
-              }
-            }
-          }
-        }
-
-        if (dist == 0x7FFF) {
-          GAMEWIN = 1; // No dots, GAME WIN!
-        }
-
-      }
-    }
-
     void Scatter(Sprite* s)
     {
       const byte* st = _scatterTargets + (s->who << 1);
@@ -827,7 +696,6 @@ class Playfield
     {
       if (_state == ReadyState)
         return;
-      PacmanAI();
       Sprite* pacman = _sprites + PACMAN;
 
       //  Ghost AI
@@ -845,14 +713,14 @@ class Playfield
             s->pentimer = 80;
           }
           else
-            s->Target(14, 17);          // target pen
-          continue;           //
+            s->Target(14, 17);          // target pen entrance
+          continue;
         }
 
         //  Release ghost from pen when timer expires
         if (s->pentimer)
         {
-          if (--s->pentimer)  // stay in pen for awhile
+          if (--s->pentimer)  // stay in pen a while longer
             continue;
           s->state = RunState;
         }
@@ -872,15 +740,15 @@ class Playfield
             {
               case PINKY:
                 {
-                  const char* pto = _pinkyTargetOffset + ((pacman->dir - 1) << 1);
+                  const signed char* pto = _pinkyTargetOffset + ((pacman->dir - 1) << 1);
                   tx += pgm_read_byte(pto);
                   ty += pgm_read_byte(pto + 1);
                 }
                 break;
               case INKY:
                 {
-                  const char* pto = _pinkyTargetOffset + ((pacman->dir - 1) << 1);
-                  Sprite* binky = _sprites + BINKY;
+                  const signed char* pto = _pinkyTargetOffset + ((pacman->dir - 1) << 1);
+                  Sprite* binky = _sprites + BLINKY;
                   tx += pgm_read_byte(pto) >> 1;
                   ty += pgm_read_byte(pto + 1) >> 1;
                   tx += tx - binky->cx;
@@ -904,7 +772,6 @@ class Playfield
       }
     }
 
-    //  Default to current direction
     byte ChooseDir(int16_t dir, Sprite* s)
     {
       int16_t choice[4];
@@ -913,38 +780,44 @@ class Playfield
       choice[2] = Chase(s, s->cx, s->cy + 1); // Down
       choice[3] = Chase(s, s->cx + 1, s->cy); // Right
 
-
-      if (DEMO == 0 && s->who == PACMAN && choice[0] < 0x7FFF && but_UP) dir = MUp;
-      else if (DEMO == 0 && s->who == PACMAN && choice[1] < 0x7FFF && but_LEFT) dir = MLeft;
-      else if (DEMO == 0 && s->who == PACMAN && choice[2] < 0x7FFF && but_DOWN) dir = MDown;
-      else if (DEMO == 0 && s->who == PACMAN && choice[3] < 0x7FFF && but_RIGHT) dir = MRight;
-
-      else if (DEMO == 0 && choice[0] < 0x7FFF && s->who == PACMAN && dir == MUp) dir = MUp;
-      else if (DEMO == 0 && choice[1] < 0x7FFF && s->who == PACMAN && dir == MLeft) dir = MLeft;
-      else if (DEMO == 0 && choice[2] < 0x7FFF && s->who == PACMAN && dir == MDown) dir = MDown;
-      else if (DEMO == 0 && choice[3] < 0x7FFF && s->who == PACMAN && dir == MRight) dir = MRight;
-      else if ((DEMO == 0 && s->who != PACMAN) || DEMO == 1 ) {
-
-        // Don't choose opposite of current direction?
-
-        int16_t dist = choice[4 - dir]; // favor current direction
-        byte opposite = OppositeDirection(dir);
-        for (byte i = 0; i < 4; i++)
-        {
-          byte d = 4 - i;
-          if ((d != opposite && choice[i] < dist) || (s->who == PACMAN && PACMANFALLBACK &&  choice[i] < dist))
-          {
-            if (s->who == PACMAN && PACMANFALLBACK) PACMANFALLBACK = 0;
-            dist = choice[i];
-            dir = d;
-          }
-
-        }
-
-      } else  {
-        dir = MStopped;
+      // ── Pacman: player input ─────────────────────────────────────────────
+      if (s->who == PACMAN) {
+        if (choice[0] < 0x7FFF && but_UP)    return MUp;
+        if (choice[1] < 0x7FFF && but_LEFT)  return MLeft;
+        if (choice[2] < 0x7FFF && but_DOWN)  return MDown;
+        if (choice[3] < 0x7FFF && but_RIGHT) return MRight;
+        // Continue in current direction if still open
+        if (choice[0] < 0x7FFF && dir == MUp)    return MUp;
+        if (choice[1] < 0x7FFF && dir == MLeft)  return MLeft;
+        if (choice[2] < 0x7FFF && dir == MDown)  return MDown;
+        if (choice[3] < 0x7FFF && dir == MRight) return MRight;
+        return MStopped;
       }
 
+      // ── Ghost AI ─────────────────────────────────────────────────────────
+      byte opposite = OppositeDirection(dir);
+
+      // Frightened: random valid direction — matches original arcade RNG behaviour
+      if (s->state == FrightenedState) {
+        byte valid[4], count = 0;
+        for (byte i = 0; i < 4; i++) {
+          byte d = 4 - i;
+          if (choice[i] < 0x7FFF && d != opposite)
+            valid[count++] = d;
+        }
+        if (count) return valid[random(count)];
+      }
+
+      // Chase / scatter: greedy minimum distance to target, no reversals
+      if (dir < 1 || dir > 4) return MStopped;  // guard against invalid direction
+      int16_t dist = choice[4 - dir]; // favour current direction on ties
+      for (byte i = 0; i < 4; i++) {
+        byte d = 4 - i;
+        if (d != opposite && choice[i] < dist) {
+          dist = choice[i];
+          dir  = d;
+        }
+      }
       return dir;
     }
 
@@ -965,19 +838,29 @@ class Playfield
         return 100;
       if (s->cy == 17 && (s->cx <= 5 || s->cx > 20))
         return 40;  // tunnel
+
+      // Cruise Elroy: Blinky speeds up as dots are depleted.
+      // Thresholds scale with level, matching the original arcade values.
+      if (s->who == BLINKY) {
+        byte lvl    = (LEVEL < 7) ? LEVEL : 7;  // caps at level 7
+        byte elroy1 = 10 + lvl * 10;             // 20 @ L1, 30 @ L2 … 80 @ L7+
+        byte elroy2 = elroy1 >> 1;
+        if (_dotsLeft <= elroy2) return 90;      // Elroy 2: 90 % speed
+        if (_dotsLeft <= elroy1) return 85;      // Elroy 1: 85 % speed
+      }
+
       return 75;
     }
 
     void PackmanDied() {  // Noooo... PACMAN DIED :(
 
-      if (LIFES <= 0) {
+      if (LIVES <= 0) {
         GAMEOVER = 1;
         LEVEL = START_LEVEL;
-        LIFES = START_LIFES;
-        DEMO = 1;
+        LIVES = START_LIVES;
         Init();
       } else {
-        LIFES--;
+        LIVES--;
 
         _inited = true;
         _state = ReadyState;
@@ -994,7 +877,6 @@ class Playfield
 
         memset(_icons, 0, sizeof(_icons));
 
-        //AND BONUS
         _BonusSprite.Init(s + 5 * 5);
         _BonusInactiveTimmer = BONUS_INACTIVE_TIME;
         _BonusActiveTimmer = 0;
@@ -1003,11 +885,10 @@ class Playfield
           _icons[13 - i] = BONUSICON + i;
         }
 
-        for (byte i = 0; i < LIFES; i++) {
+        for (byte i = 0; i < LIVES; i++) {
           _icons[0 + i] = PACMANICON;
         }
 
-        //Draw LIFE and BONUS Icons
         for (byte y = 34; y < 36; y++)
           for (byte x = 0; x < 28; x++) {
             Draw(x, y, false);
@@ -1033,10 +914,7 @@ class Playfield
           {
             case ReadyState:
               _state = PlayState;
-              _dirty[20 * 4 + 1] |= 0x1F; // Clear 'READY!'
-              _dirty[20 * 4 + 2] |= 0x80;
-
-              for (byte tmpX = 11; tmpX < 17; tmpX++) Draw(tmpX, 20, false); // ReDraw (clear) 'READY' position
+              for (byte tmpX = 11; tmpX < 17; tmpX++) Draw(tmpX, 20, false); // clear 'READY!'
 
               break;
             case DeadGhostState:
@@ -1118,12 +996,11 @@ class Playfield
         ACTUALBONUS++;
         if (ACTUALBONUS > 7) {
           ACTUALBONUS = 0;
-          if (LIFES < MAXLIFES) LIFES++;
+          if (LIVES < MAXLIVES) LIVES++;
 
-          //reset all icons
-          memset(_icons, 0, sizeof(_icons));
+            memset(_icons, 0, sizeof(_icons));
 
-          for (byte i = 0; i < LIFES; i++) {
+          for (byte i = 0; i < LIVES; i++) {
             _icons[0 + i] = PACMANICON;
           }
 
@@ -1133,7 +1010,6 @@ class Playfield
           _icons[13 - i] = BONUSICON + i;
         }
 
-        //REDRAW LIFE and BONUS icons
         for (byte y = 34; y < 36; y++)
           for (byte x = 0; x < 28; x++) {
             Draw(x, y, false);
@@ -1146,7 +1022,6 @@ class Playfield
       for (byte i = 0; i < 4; i++)
       {
         Sprite* s = _sprites + i;
-        //if (s->cx == pacman->cx && s->cy == pacman->cy)
         if (s->_x + SPEED >= pacman->_x && s->_x - SPEED <= pacman->_x && s->_y + SPEED >= pacman->_y && s->_y - SPEED <= pacman->_y)
 
 
@@ -1183,8 +1058,7 @@ class Playfield
       if (_scoreStr[i] == c)
         return;
       _scoreStr[i] = c;
-      Mark(i + 32);  //Score
-      //Mark(i+32+10); //HiScore
+      Mark(i + 32);
 
     }
 
@@ -1193,26 +1067,24 @@ class Playfield
       if (_hiscoreStr[i] == c)
         return;
       _hiscoreStr[i] = c;
-      //Mark(i+32);    //Score
-      Mark(i + 32 + 10); //HiScore
+      Mark(i + 32 + 10);
     }
 
     void Score(int16_t delta)
     {
       char str[8];
       _score += delta;
-      if (DEMO == 0 && _score > _hiscore) _hiscore = _score;
+      if (_score > _hiscore) _hiscore = _score;
 
       if (_score > _lifescore && _score % 10000 > 0) {
         _lifescore = (_score / 10000 + 1) * 10000;
 
-        LIFES++; // EVERY 10000 points = 1UP
+        LIVES++; // EVERY 10000 points = 1UP
 
-        for (byte i = 0; i < LIFES; i++) {
+        for (byte i = 0; i < LIVES; i++) {
           _icons[0 + i] = PACMANICON;
         }
 
-        //REDRAW LIFE and BONUS icons
         for (byte y = 34; y < 36; y++)
           for (byte x = 0; x < 28; x++) {
             Draw(x, y, false);
@@ -1221,11 +1093,13 @@ class Playfield
       }
 
       sprintf(str, "%ld", _score);
+      if (strlen(str) > 7) strcpy(str, "9999999");
       byte i = 7 - strlen(str);
       byte j = 0;
       while (i < 7)
         SetScoreChar(i++, str[j++]);
       sprintf(str, "%ld", _hiscore);
+      if (strlen(str) > 7) strcpy(str, "9999999");
       i = 7 - strlen(str);
       j = 0;
       while (i < 7)
@@ -1262,6 +1136,9 @@ class Playfield
       }
       else
         Score(10);
+
+      if (_dotsLeft) _dotsLeft--;
+      if (!_dotsLeft) GAMEWIN = 1;
     }
 
     void Init()
@@ -1270,7 +1147,7 @@ class Playfield
         GAMEWIN = 0;
       } else {
         LEVEL = START_LEVEL;
-        LIFES = START_LIFES;
+        LIVES = START_LIVES;
         ACTUALBONUS = 0; //actual bonus icon
         ACTIVEBONUS = 0; //status of bonus
 
@@ -1292,7 +1169,6 @@ class Playfield
       for (int16_t i = 0; i < 5; i++)
         _sprites[i].Init(s + i * 5);
 
-      //AND BONUS
       _BonusSprite.Init(s + 5 * 5);
       _BonusInactiveTimmer = BONUS_INACTIVE_TIME;
       _BonusActiveTimmer = 0;
@@ -1302,26 +1178,23 @@ class Playfield
 
       memset(_icons, 0, sizeof(_icons));
 
-      // SET BONUS icons
       for (byte i = 0; i < ACTUALBONUS; i++) {
         _icons[13 - i] = BONUSICON + i;
       }
 
-      // SET Lifes icons
-      for (byte i = 0; i < LIFES; i++) {
+      for (byte i = 0; i < LIVES; i++) {
         _icons[0 + i] = PACMANICON;
       }
 
-      //Draw LIFE and BONUS Icons
       for (byte y = 34; y < 36; y++)
         for (byte x = 0; x < 28; x++) {
           Draw(x, y, false);
         }
 
-      //  Init dots from rom
+      _dotsLeft = 0;
       memset(_dotMap, 0, sizeof(_dotMap));
       byte* map = _dotMap;
-      for (byte y = 3; y < 36 - 3; y++) // 30 interior lines
+      for (byte y = 3; y < 36 - 3; y++) // rows 3–32: playfield interior
       {
         for (byte x = 0; x < 28; x++)
         {
@@ -1330,6 +1203,7 @@ class Playfield
           {
             byte s = x & 7;
             map[x >> 3] |= (0x80 >> s);
+            _dotsLeft++;
           }
         }
         map += 4;
@@ -1339,66 +1213,309 @@ class Playfield
 
     void Step()
     {
-      int16_t keys = 0;
-
       if (GAMEWIN == 1) {
         LEVEL++;
         Init();
       }
 
-      // Start GAME
-      if (but_A && DEMO == 1 && GAMEPAUSED == 0) {
-        but_A = false;
-        DEMO = 0;
-        Init();
-      } else if (but_A && DEMO == 0 && GAMEPAUSED == 0) { // Or PAUSE GAME
+      // Pause toggle (button A)
+      if (but_A && !GAMEPAUSED) {
         but_A = false;
         GAMEPAUSED = 1;
-      }
-
-      if (GAMEPAUSED && but_A && DEMO == 0) {
+      } else if (but_A && GAMEPAUSED) {
         but_A = false;
         GAMEPAUSED = 0;
         for (byte tmpX = 11; tmpX < 17; tmpX++) Draw(tmpX, 20, false);
       }
 
-      // Reset / Start GAME
+      // Reset (button B) or auto-init on first run
       if (but_B) {
-        DEMO = 0;
         Init();
       } else if (!_inited) {
-        DEMO = 1;
         Init();
       }
 
-      // Create a bitmap of dirty tiles
-      byte m[(32 / 8) * 36]; // 144 bytes
-      memset(m, 0, sizeof(m));
-      _dirty = m;
+      if (!GAMEPAUSED) MoveAll();
 
-
-      if (!GAMEPAUSED) MoveAll(); // IF GAME is PAUSED STOP ALL
-
-      if ((ACTIVEBONUS == 0 && DEMO == 1) || GAMEPAUSED == 1 ) for (byte tmpX = 11; tmpX < 17; tmpX++) Draw(tmpX, 20, false); // Draw 'PAUSED' or 'DEMO' text
+      if (GAMEPAUSED) for (byte tmpX = 11; tmpX < 17; tmpX++) Draw(tmpX, 20, false);
 
       DrawAll();
     }
 };
 
+// ── Font helpers (reuse the game's 8×8 playTiles font) ────────────────────
+void drawChar(char c, int16_t x, int16_t y, uint16_t color, byte scale = 1) {
+  if (c == ' ') return;
+  const byte* glyph = playTiles + ((byte)c << 3);
+  for (byte row = 0; row < 8; row++) {
+    signed char bits = (signed char)pgm_read_byte(glyph + row);
+    for (byte col = 0; col < 8 && bits; col++) {
+      if (bits < 0)
+        tft.fillRect(x + col * scale, y + row * scale, scale, scale, color);
+      bits <<= 1;
+    }
+  }
+}
+
+void drawStr(const char* s, int16_t x, int16_t y, uint16_t color, byte scale = 1) {
+  while (*s) { drawChar(*s++, x, y, color, scale); x += 8 * scale; }
+}
+
+// ── Flappy Bird ───────────────────────────────────────────────────────────
+class FlappyBird {
+  static const int16_t BIRD_X   = 35;
+  static const int16_t BIRD_SZ  = 10;
+  static const int16_t PIPE_W   = 26;
+  static const int16_t GAP_H    = 90;
+  static const int16_t PIPE_SPD = 2;
+  static const int16_t GROUND_H = 10;
+  static const byte    NPIPES   = 2;
+
+  int16_t  birdY, birdVel;
+  int16_t  pipeX[NPIPES], gapY[NPIPES];
+  bool     passed[NPIPES];
+  uint16_t score;
+  bool     dead, started;
+
+  uint16_t COL_SKY, COL_PIPE, COL_BIRD, COL_GROUND, COL_WHITE, COL_RED;
+
+  void safeFill(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t c) {
+    if (x >= TFT_WIDTH || y >= TFT_HEIGHT || x + w <= 0 || y + h <= 0) return;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > TFT_WIDTH)  w = TFT_WIDTH  - x;
+    if (y + h > TFT_HEIGHT) h = TFT_HEIGHT - y;
+    if (w > 0 && h > 0) tft.fillRect(x, y, w, h, c);
+  }
+
+  void pipeCols(int16_t x, int16_t w, int16_t gy, uint16_t c) {
+    safeFill(x, 0,           w, gy,                            c);
+    safeFill(x, gy + GAP_H,  w, TFT_HEIGHT - GROUND_H - gy - GAP_H, c);
+  }
+
+  void bird(uint16_t c) {
+    tft.fillRect(BIRD_X, birdY - BIRD_SZ / 2, BIRD_SZ, BIRD_SZ, c);
+  }
+
+  void showScore() {
+    char buf[8]; sprintf(buf, "%u", score);
+    safeFill(2, 2, 50, 10, COL_SKY);
+    drawStr(buf, 4, 2, COL_WHITE);
+  }
+
+public:
+  void init() {
+    birdY = TFT_HEIGHT / 2; birdVel = 0;
+    score = 0; dead = false; started = false;
+
+    COL_SKY    = tft.color565(135, 206, 235);
+    COL_PIPE   = tft.color565( 60, 160,  60);
+    COL_BIRD   = tft.color565(255, 200,   0);
+    COL_GROUND = tft.color565(180, 120,  60);
+    COL_WHITE  = tft.color565(255, 255, 255);
+    COL_RED    = tft.color565(255,  60,  60);
+
+    pipeX[0] = TFT_WIDTH + 20;
+    pipeX[1] = TFT_WIDTH + 20 + TFT_WIDTH / 2 + PIPE_W;
+    for (byte i = 0; i < NPIPES; i++) {
+      gapY[i]   = random(30, TFT_HEIGHT - GAP_H - GROUND_H - 30);
+      passed[i] = false;
+    }
+
+    tft.fillRect(0, 0, TFT_WIDTH, TFT_HEIGHT - GROUND_H, COL_SKY);
+    tft.fillRect(0, TFT_HEIGHT - GROUND_H, TFT_WIDTH, GROUND_H, COL_GROUND);
+    bird(COL_BIRD);
+    showScore();
+    drawStr("PRESS A", (TFT_WIDTH - 7 * 8) / 2, TFT_HEIGHT / 2 + 20, COL_WHITE);
+  }
+
+  void flap() {
+    if (!started) {
+      started = true;
+      safeFill(0, TFT_HEIGHT / 2 + 16, TFT_WIDTH, 12, COL_SKY);
+    }
+    birdVel = -20;
+  }
+
+  bool step() {
+    if (!started || dead) return !dead;
+
+    bird(COL_SKY);   // erase
+
+    for (byte i = 0; i < NPIPES; i++) {
+      pipeCols(pipeX[i] + PIPE_W - PIPE_SPD, PIPE_SPD, gapY[i], COL_SKY);  // trailing edge
+      pipeX[i] -= PIPE_SPD;
+
+      if (!passed[i] && pipeX[i] + PIPE_W / 2 < BIRD_X) {
+        passed[i] = true; score++; showScore();
+      }
+      if (pipeX[i] + PIPE_W <= 0) {
+        pipeX[i] = TFT_WIDTH + 10;
+        gapY[i]  = random(30, TFT_HEIGHT - GAP_H - GROUND_H - 30);
+        passed[i] = false;
+      }
+      pipeCols(pipeX[i], PIPE_SPD, gapY[i], COL_PIPE);  // leading edge
+    }
+
+    birdVel += 2;
+    birdY   += birdVel >> 2;
+    if (birdY < BIRD_SZ / 2) { birdY = BIRD_SZ / 2; birdVel = 0; }
+    if (birdY > TFT_HEIGHT - GROUND_H - BIRD_SZ / 2) dead = true;
+
+    for (byte i = 0; i < NPIPES; i++) {
+      if (pipeX[i] < BIRD_X + BIRD_SZ && pipeX[i] + PIPE_W > BIRD_X) {
+        if (birdY - BIRD_SZ / 2 < gapY[i] || birdY + BIRD_SZ / 2 > gapY[i] + GAP_H)
+          dead = true;
+      }
+    }
+
+    if (dead) {
+      char buf[16]; sprintf(buf, "SCORE  %u", score);
+      drawStr("GAME OVER",  (TFT_WIDTH - 9 * 8) / 2, TFT_HEIGHT / 2 - 16, COL_RED);
+      drawStr(buf,          (TFT_WIDTH - (int16_t)strlen(buf) * 8) / 2, TFT_HEIGHT / 2,     COL_WHITE);
+      drawStr("RIGHT MENU", (TFT_WIDTH - 10 * 8) / 2, TFT_HEIGHT / 2 + 16, COL_WHITE);
+      drawStr("A  RETRY",   (TFT_WIDTH -  8 * 8) / 2, TFT_HEIGHT / 2 + 28, COL_WHITE);
+      return false;
+    }
+
+    bird(COL_BIRD);  // redraw
+    return true;
+  }
+
+  bool isDead() { return dead; }
+};
+
+FlappyBird flappyGame;
+Playfield  _game;
+
 /******************************************************************************/
 /*   SETUP                                                                    */
 /******************************************************************************/
 
-#define BLACK 0x0000 // 16bit BLACK Color
+#define BLACK 0x0000
+
+// Draws "PACMAN" in the 52 px header band using the game's 8×8 font tiles scaled 2×.
+void drawBanner(const char* text) {
+  const byte     scale = 2;
+  const uint16_t col   = tft.color565(255, 220, 0);
+  byte           len   = strlen(text);
+  uint16_t       textW = len * 8 * scale;
+  uint16_t       x0    = (TFT_WIDTH - textW) / 2;
+  uint16_t       y0    = (52 - 8 * scale) / 2;
+
+  for (byte ci = 0; ci < len; ci++) {
+    uint16_t cx = x0 + ci * (8 * scale);
+    const byte* glyph = playTiles + ((byte)text[ci] << 3);
+    for (byte row = 0; row < 8; row++) {
+      signed char bits = (signed char)pgm_read_byte(glyph + row);
+      for (byte col2 = 0; col2 < 8 && bits; col2++) {
+        if (bits < 0)
+          tft.fillRect(cx + col2 * scale, y0 + row * scale, scale, scale, col);
+        bits <<= 1;
+      }
+    }
+  }
+}
+
+void drawHomeScreen() {
+  const uint16_t COL_SELBG  = tft.color565( 20,  20,  80);
+  const uint16_t COL_YELLOW = tft.color565(255, 220,   0);
+  const uint16_t COL_WHITE  = tft.color565(220, 220, 220);
+  const uint16_t COL_GREY   = tft.color565(110, 110, 110);
+  const uint16_t COL_DIM    = tft.color565( 70,  70,  70);
+
+  tft.fillRect(0, 0, TFT_WIDTH, TFT_HEIGHT, BLACK);
+  drawBanner("ARCADE");
+
+  drawStr("SELECT  GAME", (TFT_WIDTH - 12 * 8) / 2, 72, COL_WHITE);
+
+  const char*  labels[] = { "PACMAN", "FLAPPY BIRD" };
+  const byte   lens[]   = {  6,        11           };
+  const int16_t ys[]    = { 148,       198          };
+
+  for (byte i = 0; i < 2; i++) {
+    bool     sel = (i == menuSel);
+    uint16_t bg  = sel ? COL_SELBG : BLACK;
+    uint16_t fg  = sel ? COL_YELLOW : COL_GREY;
+    tft.fillRect(0, ys[i] - 4, TFT_WIDTH, 16, bg);
+    int16_t tx = (TFT_WIDTH - lens[i] * 8) / 2;
+    drawStr(labels[i], tx, ys[i], fg);
+    if (sel) drawStr(">", tx - 10, ys[i], COL_YELLOW);
+  }
+
+  drawStr("UP DN  MOVE",  (TFT_WIDTH - 11 * 8) / 2, 264, COL_DIM);
+  drawStr("A  START",     (TFT_WIDTH -  8 * 8) / 2, 276, COL_DIM);
+}
+
+void homeScreenLoop() {
+  static byte prevSel  = 0;
+  static bool prevUp   = false, prevDown = false, prevA = false;
+
+  bool currUp   = (digitalRead(PIN_BTN_UP)   == LOW);
+  bool currDown = (digitalRead(PIN_BTN_DOWN) == LOW);
+  bool currA    = (digitalRead(PIN_BTN_A)    == LOW);
+
+  if ((currUp && !prevUp) || (currDown && !prevDown))
+    menuSel ^= 1;
+
+  if (currA && !prevA) {
+    if (menuSel == 0) {
+      but_A    = false;  // prevent A-press carrying over into Pacman's pause handler
+      appState = StatePacman;
+      _game.forceRedraw();
+    } else {
+      appState = StateFlappy;
+      flappyGame.init();
+    }
+  }
+
+  prevUp = currUp; prevDown = currDown; prevA = currA;
+
+  if (menuSel != prevSel) {
+    prevSel = menuSel;
+    drawHomeScreen();
+  }
+}
+
+void drawPacmanEndMenu() {
+  const int16_t  BX = 15, BY = 115, BW = 140, BH = 86;
+  const uint16_t BG  = tft.color565( 10,  10,  60);
+  const uint16_t YEL = tft.color565(255, 220,   0);
+  const uint16_t GRY = tft.color565(110, 110, 110);
+
+  tft.fillRect(BX, BY, BW, BH, BG);
+  tft.drawFastHLine(BX,          BY,          BW, YEL);
+  tft.drawFastHLine(BX,          BY + BH - 1, BW, YEL);
+  tft.drawFastVLine(BX,          BY,          BH, YEL);
+  tft.drawFastVLine(BX + BW - 1, BY,          BH, YEL);
+
+  drawStr("GAME OVER", BX + (BW - 9 * 8) / 2, BY + 8, YEL);
+
+  const char*  labels[] = { "RESTART", "MENU" };
+  const int16_t  ys[]   = { BY + 36, BY + 58 };
+
+  for (byte i = 0; i < 2; i++) {
+    uint16_t fg = (i == endMenuSel) ? YEL : GRY;
+    int16_t  tx = BX + (BW - (int16_t)strlen(labels[i]) * 8) / 2;
+    tft.fillRect(BX + 1, ys[i] - 2, BW - 2, 14, BG);
+    drawStr(labels[i], tx, ys[i], fg);
+    if (i == endMenuSel) drawStr(">", BX + 8, ys[i], YEL);
+  }
+}
 
 void setup() {
   randomSeed(analogRead(0));
-  Serial.begin(115200);  
-  WiFi.softAP(ssid, password);
-  udp.begin(localPort);
+  Serial.begin(115200);
+
+  pinMode(PIN_BTN_A,     INPUT_PULLUP);
+  pinMode(PIN_BTN_LEFT,  INPUT_PULLUP);
+  pinMode(PIN_BTN_DOWN,  INPUT_PULLUP);
+  pinMode(PIN_BTN_UP,    INPUT_PULLUP);
+  pinMode(PIN_BTN_RIGHT, INPUT_PULLUP);
+
   tft.begin();
   delay(100);
-  tft.fillRect(0, 0, TFT_WIDTH, TFT_HEIGHT, BLACK);
+  drawHomeScreen();
 }
 
 /******************************************************************************/
@@ -1414,29 +1531,100 @@ void ClearKeys() {
   but_RIGHT=false;
 }
 
-void KeyPadLoop(){
+void KeyPadLoop() {
+  // Direction buttons: pressing a direction latches it until a new one is pressed.
+  // All buttons are active-LOW (INPUT_PULLUP).
+  if      (digitalRead(PIN_BTN_UP)    == LOW) { but_UP=true;    but_DOWN=but_LEFT=but_RIGHT=false; }
+  else if (digitalRead(PIN_BTN_DOWN)  == LOW) { but_DOWN=true;  but_UP=but_LEFT=but_RIGHT=false;   }
+  else if (digitalRead(PIN_BTN_LEFT)  == LOW) { but_LEFT=true;  but_UP=but_DOWN=but_RIGHT=false;   }
+  else if (digitalRead(PIN_BTN_RIGHT) == LOW) { but_RIGHT=true; but_UP=but_DOWN=but_LEFT=false;    }
+
+  // A button (pause): edge-triggered so one press = one toggle.
+  static bool prevA = HIGH;
+  bool currA = (digitalRead(PIN_BTN_A) == LOW);
+  if (currA && !prevA) but_A = true;
+  prevA = currA;
+
+  // Serial fallback for debug (z=pause, 8/2/4/6=directions, x=restart)
   if (Serial.available()) {
     char r = Serial.read();
-    if (r == 'z') { ClearKeys();  but_A=true; delay(300); } //else but_A=false;
-    if (r == 'x') { ClearKeys();  but_B=true; delay(300); }  else but_B=false;
-    if (r == '8') { ClearKeys();  but_UP=true; }  //else but_UP=false;
-    if (r == '2') { ClearKeys();  but_DOWN=true; }  //else but_DOWN=false;
-    if (r == '4') { ClearKeys();  but_LEFT=true; }  // else but_LEFT=false;
-    if (r == '6') { ClearKeys();  but_RIGHT=true; }  //else but_RIGHT=false;
-  }
-  if (udp.parsePacket()) {
-    char r = udp.read();
-    if (r == 'z') { ClearKeys();  but_A=true; delay(300); } //else but_A=false;
-    if (r == 'x') { ClearKeys();  but_B=true; delay(300); }  else but_B=false;
-    if (r == '8') { ClearKeys();  but_UP=true; }  //else but_UP=false;
-    if (r == '2') { ClearKeys();  but_DOWN=true; }  //else but_DOWN=false;
-    if (r == '4') { ClearKeys();  but_LEFT=true; }  // else but_LEFT=false;
-    if (r == '6') { ClearKeys();  but_RIGHT=true; }  //else but_RIGHT=false;  
+    if (r == 'z') { but_A = true; }
+    if (r == 'x') { but_B = true; }
+    if (r == '8') { but_UP=true;    but_DOWN=but_LEFT=but_RIGHT=false; }
+    if (r == '2') { but_DOWN=true;  but_UP=but_LEFT=but_RIGHT=false;   }
+    if (r == '4') { but_LEFT=true;  but_UP=but_DOWN=but_RIGHT=false;   }
+    if (r == '6') { but_RIGHT=true; but_UP=but_DOWN=but_LEFT=false;    }
   }
 }
 
-Playfield _game;
 void loop() {
-  _game.Step();
   KeyPadLoop();
+
+  switch (appState) {
+
+    case StateHome:
+      homeScreenLoop();
+      break;
+
+    case StatePacman: {
+      static uint32_t lastMs = 0;
+      uint32_t now = millis();
+      if (now - lastMs >= (1000 / FPS)) {
+        lastMs = now;
+        _game.Step();
+      }
+      if (GAMEOVER) {
+        GAMEOVER      = 0;
+        endMenuSel    = 0;
+        appState      = StatePacmanEnd;
+        but_A = but_UP = but_DOWN = false;  // clear stale button state on entry
+        drawPacmanEndMenu();
+      }
+      break;
+    }
+
+    case StatePacmanEnd: {
+      static bool prevUp = false, prevDown = false, prevA = false;
+      bool currUp   = (digitalRead(PIN_BTN_UP)   == LOW);
+      bool currDown = (digitalRead(PIN_BTN_DOWN) == LOW);
+      bool currA    = (digitalRead(PIN_BTN_A)    == LOW);
+
+      if ((currUp && !prevUp) || (currDown && !prevDown)) {
+        endMenuSel ^= 1;
+        drawPacmanEndMenu();
+      }
+      if (currA && !prevA) {
+        if (endMenuSel == 0) {
+          but_A    = false;
+          appState = StatePacman;
+          _game.forceRedraw();
+        } else {
+          appState = StateHome;
+          menuSel  = 0;
+          drawHomeScreen();
+        }
+      }
+      prevUp = currUp; prevDown = currDown; prevA = currA;
+      break;
+    }
+
+    case StateFlappy:
+      if (but_A) {
+        but_A = false;
+        if (flappyGame.isDead())
+          flappyGame.init();
+        else
+          flappyGame.flap();
+      }
+      flappyGame.step();
+      if (but_RIGHT) {
+        but_RIGHT = false;
+        appState  = StateHome;
+        menuSel   = 1;
+        drawHomeScreen();
+        break;
+      }
+      delay(30);   // ~33 fps
+      break;
+  }
 }

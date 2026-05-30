@@ -1,6 +1,6 @@
 /******************************************************************************/
 /*                                                                            */
-/*  PACMAN GAME FOR ARDUINO DUE                                               */
+/*  PACMAN GAME FOR ESP32 — ST7789 170×320                                    */
 /*                                                                            */
 /******************************************************************************/
 /*  Copyright (c) 2014  Dr. NCX (mirracle.mxx@gmail.com)                      */
@@ -15,6 +15,8 @@
 /* SOFTWARE.                                                                  */
 /*                                                                            */
 /*  MIT license, all text above must be included in any redistribution.       */
+/*                                                                            */
+/*  Portions Copyright (c) 2026 dividuraga — ST7789 ESP32 port                */
 
 #include "ili9328.h"
 
@@ -43,19 +45,21 @@ uint16_t _paletteW[] =
   C16(222, 222, 255),  // 15 whiteish
 };
 
+// Nearest-neighbour scale: 8×8 tile index buffer → 6×6 pixels on screen.
+// Source columns used: 0,1,2,4,5,6  (skips 3 and 7).
 void drawIndexedmap(ili9328SPI* tft, uint8_t* indexmap, int16_t x, uint16_t y) {
-  byte i = 0;
-  word color = (word)_paletteW[indexmap[0]];
-  for (byte tmpY = 0; tmpY < 8; tmpY++) {
-    byte width = 1;
-    for (byte tmpX = 0; tmpX < 8; tmpX++) {
-      word next_color = (word)_paletteW[indexmap[++i]];
-      if ((color != next_color && width >= 1) || tmpX == 7) {
-        tft->drawFastHLine1(x + tmpX - width + 1, y + tmpY, width - 1, color);
-        color = next_color;
-        width = 0;
+  for (byte oy = 0; oy < 6; oy++) {
+    byte sy = (oy * 8) / 6;
+    word color = (word)_paletteW[indexmap[sy * 8]];
+    byte runStart = 0;
+
+    for (byte ox = 1; ox <= 6; ox++) {
+      word next = (ox < 6) ? (word)_paletteW[indexmap[sy * 8 + (ox * 8) / 6]] : ~color;
+      if (next != color) {
+        tft->drawFastHLine1(x + runStart, y + oy, ox - runStart, color);
+        color = next;
+        runStart = ox;
       }
-      width++;
     }
   }
 }
